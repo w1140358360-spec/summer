@@ -1,4 +1,4 @@
-![cover](cover)
+![cover](./cover.png)
 # Gesture Particle Game ✨🖐️
 
 一个基于 **Three.js + MediaPipe Hands** 的 3D 粒子交互小游戏  
