@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D粒子交互系统 - 手势控制</title>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #050505; font-family: 'Inter', system-ui, sans-serif; }
+        #video-container {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 240px;
+            height: 180px;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            transform: scaleX(-1); /* 镜像画面 */
+            z-index: 50;
+        }
+        canvas { display: block; }
+        .glass-panel {
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .hud-text {
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+        }
+        /* 隐藏MediaPipe默认加载提示 */
+        .loading {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: #000; display: flex; align-items: center;
+            justify-content: center; z-index: 100; color: white;
+            transition: opacity 0.5s;
+        }
+    </style>
+</head>
+<body>
+
+<div id="loading-screen" class="loading">
+    <div class="text-center">
+        <div class="w-16 h-16 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+        <p class="text-xl font-light tracking-widest uppercase">初始化粒子系统与AI引擎...</p>
+    </div>
+</div>
+
+<!-- 视频反馈 -->
+<div id="video-container">
+    <video id="input-video" class="w-full h-full object-cover"></video>
+</div>
+
+<!-- 控制台 UI -->
+<div class="fixed top-6 left-6 z-50 flex flex-col gap-4">
+    <div class="glass-panel p-5 rounded-2xl w-72">
+        <h1 class="text-cyan-400 font-bold text-lg mb-1 tracking-wider">GESTURE PARTICLES</h1>
+        <p class="text-gray-400 text-xs mb-4 uppercase">AI 隔空手势控制系统</p>
+        
+        <div class="space-y-4">
+            <div>
+                <div class="flex justify-between text-xs text-gray-300 mb-1">
+                    <span>粒子数量</span>
+                    <span id="particle-count-val">500</span>
+                </div>
+                <input type="range" id="particle-slider" min="100" max="1500" value="500" 
+                    class="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-cyan-500">
+            </div>
+
+            <div>
+                <label class="text-xs text-gray-300 block mb-1">核心色调</label>
+                <div class="flex gap-2">
+                    <button class="color-btn w-6 h-6 rounded-full border-2 border-white" style="background:#00ffff" data-color="#00ffff"></button>
+                    <button class="color-btn w-6 h-6 rounded-full border-2 border-transparent" style="background:#ff00ff" data-color="#ff00ff"></button>
+                    <button class="color-btn w-6 h-6 rounded-full border-2 border-transparent" style="background:#ffff00" data-color="#ffff00"></button>
+                    <button class="color-btn w-6 h-6 rounded-full border-2 border-transparent" style="background:#ffffff" data-color="#ffffff"></button>
+                </div>
+            </div>
+
+            <div class="pt-2 flex gap-2">
+                <button id="reset-btn" class="flex-1 py-2 bg-white/10 hover:bg-white/20 text-white text-xs rounded-lg transition">重置系统</button>
+                <button id="fullscreen-btn" class="flex-1 py-2 bg-white/10 hover:bg-white/20 text-white text-xs rounded-lg transition">全屏模式</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 实时状态展示 -->
+    <div class="glass-panel p-4 rounded-2xl flex items-center gap-4">
+        <div id="status-icon" class="w-3 h-3 rounded-full bg-red-500 animate-pulse"></div>
+        <div>
+            <div id="status-text" class="text-cyan-400 text-sm font-medium hud-text uppercase tracking-widest">等待手势识别...</div>
+            <div id="gesture-hint" class="text-gray-500 text-[10px] mt-0.5 italic">尝试在镜头前张开或握紧手掌</div>
+        </div>
+    </div>
+</div>
+
+<script>
+/** -----------------------------------------------------------------
+ * 核心配置与全局变量
+ * ----------------------------------------------------------------- */
+let scene, camera, renderer, particles, lineMesh;
+let particleCount = 500;
+let particleMainColor = new THREE.Color(0x00ffff);
+let positions = [];
+let velocities = [];
+let targetPositions = [];
+let handPresent = false;
+let currentGesture = 'none'; // 'open', 'closed', 'pinch', 'swipe'
+
+// 交互力
+let forceCenter = new THREE.Vector3(0, 0, 0);
+let forceType = 0; // 0: 静态, 1: 吸引, -1: 扩散
+let rotationSpeed = 0.002;
+
+/** -----------------------------------------------------------------
+ * 初始化 Three.js 场景
+ * ----------------------------------------------------------------- */
+function initThree() {
+    scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x000000, 0.002);
+
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+    camera.position.z = 400;
+
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    document.body.appendChild(renderer.domElement);
+
+    createStarfield();
+    createParticles(particleCount);
+    
+    window.addEventListener('resize', onWindowResize);
+    animate();
+}
+
+// 创建背景星空
+function createStarfield() {
+    const starGeometry = new THREE.BufferGeometry();
+    const starCoords = [];
+    for(let i=0; i<3000; i++) {
+        starCoords.push((Math.random()-0.5)*2000, (Math.random()-0.5)*2000, (Math.random()-0.5)*2000);
+    }
+    starGeometry.setAttribute('position', new THREE.Float32BufferAttribute(starCoords, 3));
+    const starMaterial = new THREE.PointsMaterial({ color: 0x888888, size: 1.5, transparent: true });
+    scene.add(new THREE.Points(starGeometry, starMaterial));
+}
+
+// 创建可交互粒子
+function createParticles(count) {
+    if (particles) scene.remove(particles);
+    if (lineMesh) scene.remove(lineMesh);
+
+    const geometry = new THREE.BufferGeometry();
+    const lineGeometry = new THREE.BufferGeometry();
+    
+    positions = new Float32Array(count * 3);
+    velocities = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+
+    for (let i = 0; i < count; i++) {
+        const x = (Math.random() - 0.5) * 500;
+        const y = (Math.random() - 0.5) * 500;
+        const z = (Math.random() - 0.5) * 500;
+
+        positions[i * 3] = x;
+        positions[i * 3 + 1] = y;
+        positions[i * 3 + 2] = z;
+
+        velocities[i * 3] = (Math.random() - 0.5) * 2;
+        velocities[i * 3 + 1] = (Math.random() - 0.5) * 2;
+        velocities[i * 3 + 2] = (Math.random() - 0.5) * 2;
+
+        const mixColor = particleMainColor.clone().lerp(new THREE.Color(0x001122), Math.random() * 0.5);
+        colors[i * 3] = mixColor.r;
+        colors[i * 3 + 1] = mixColor.g;
+        colors[i * 3 + 2] = mixColor.b;
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const material = new THREE.PointsMaterial({
+        size: 4,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.8,
+        blending: THREE.AdditiveBlending,
+        sizeAttenuation: true
+    });
+
+    particles = new THREE.Points(geometry, material);
+    scene.add(particles);
+
+    // 粒子连线（限制前100个粒子以保证性能）
+    const lineMaterial = new THREE.LineBasicMaterial({ 
+        vertexColors: true, 
+        transparent: true, 
+        opacity: 0.2, 
+        blending: THREE.AdditiveBlending 
+    });
+    lineMesh = new THREE.LineSegments(new THREE.BufferGeometry(), lineMaterial);
+    scene.add(lineMesh);
+}
+
+/** -----------------------------------------------------------------
+ * 手势识别逻辑 (MediaPipe)
+ * ----------------------------------------------------------------- */
+const videoElement = document.getElementById('input-video');
+const statusText = document.getElementById('status-text');
+const statusIcon = document.getElementById('status-icon');
+
+function initMediaPipe() {
+    const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7
+    });
+
+    hands.onResults(onResults);
+
+    const cameraUtils = new Camera(videoElement, {
+        onFrame: async () => {
+            await hands.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480
+    });
+    
+    cameraUtils.start().then(() => {
+        document.getElementById('loading-screen').style.opacity = '0';
+        setTimeout(() => document.getElementById('loading-screen').style.display = 'none', 500);
+    });
+}
+
+function onResults(results) {
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        handPresent = true;
+        statusIcon.className = "w-3 h-3 rounded-full bg-green-500 shadow-[0_0_10px_#22c55e]";
+        
+        const landmarks = results.multiHandLandmarks[0];
+        
+        // 映射手部位置到 3D 空间
+        // 注意：Landmarks 是 0-1 的归一化坐标
+        forceCenter.x = (0.5 - landmarks[9].x) * 800; // 使用掌心点
+        forceCenter.y = (0.5 - landmarks[9].y) * 600;
+        
+        // 手势判断逻辑
+        analyzeGesture(landmarks);
+    } else {
+        handPresent = false;
+        forceType = 0;
+        statusIcon.className = "w-3 h-3 rounded-full bg-red-500 animate-pulse";
+        statusText.innerText = "等待手势识别...";
+    }
+}
+
+function analyzeGesture(lm) {
+    // 1. 捏合度（拇指与食指指尖距离）
+    const pinchDist = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+    
+    // 2. 手掌张开度（五指尖到掌根距离的平均值）
+    const wrist = lm[0];
+    const fingerTips = [lm[8], lm[12], lm[16], lm[20]];
+    const avgDist = fingerTips.reduce((sum, tip) => sum + Math.hypot(tip.x - wrist.x, tip.y - wrist.y), 0) / 4;
+
+    if (pinchDist < 0.05) {
+        currentGesture = 'pinch';
+        forceType = 2; // 强引力
+        statusText.innerText = "手势：指尖捏合 (强引力)";
+    } else if (avgDist > 0.4) {
+        currentGesture = 'open';
+        forceType = -1; // 扩散
+        statusText.innerText = "手势：手掌张开 (排斥)";
+    } else if (avgDist < 0.2) {
+        currentGesture = 'closed';
+        forceType = 1; // 吸引
+        statusText.innerText = "手势：握拳 (聚拢)";
+    } else {
+        currentGesture = 'neutral';
+        forceType = 0;
+        statusText.innerText = "已识别手部";
+    }
+
+    // 旋转逻辑：根据手掌中心偏离屏幕中心的距离
+    rotationSpeed = (lm[9].x - 0.5) * 0.05;
+}
+
+/** -----------------------------------------------------------------
+ * 渲染循环与粒子动力学
+ * ----------------------------------------------------------------- */
+function animate() {
+    requestAnimationFrame(animate);
+    
+    const posAttr = particles.geometry.attributes.position;
+    const colors = particles.geometry.attributes.color.array;
+
+    // 每一帧粒子自旋转
+    scene.rotation.y += rotationSpeed;
+    scene.rotation.x *= 0.98; // 阻尼衰减
+
+    for (let i = 0; i < particleCount; i++) {
+        const ix = i * 3, iy = i * 3 + 1, iz = i * 3 + 2;
+
+        let vx = velocities[ix];
+        let vy = velocities[iy];
+        let vz = velocities[iz];
+
+        let px = posAttr.array[ix];
+        let py = posAttr.array[iy];
+        let pz = posAttr.array[iz];
+
+        if (handPresent) {
+            const dx = forceCenter.x - px;
+            const dy = forceCenter.y - py;
+            const dz = forceCenter.z - pz;
+            const distSq = dx*dx + dy*dy + dz*dz;
+            const dist = Math.sqrt(distSq);
+
+            if (dist < 800) {
+                const force = (forceType === 2 ? 0.08 : forceType === 1 ? 0.02 : forceType === -1 ? -0.05 : 0);
+                vx += (dx / dist) * force;
+                vy += (dy / dist) * force;
+                vz += (dz / dist) * force;
+            }
+        }
+
+        // 基础阻尼与自然飘动
+        vx *= 0.96;
+        vy *= 0.96;
+        vz *= 0.96;
+        
+        vx += (Math.random() - 0.5) * 0.1;
+        vy += (Math.random() - 0.5) * 0.1;
+        vz += (Math.random() - 0.5) * 0.1;
+
+        // 回弹约束
+        if (Math.abs(px) > 800) vx -= Math.sign(px) * 0.5;
+        if (Math.abs(py) > 600) vy -= Math.sign(py) * 0.5;
+        if (Math.abs(pz) > 600) vz -= Math.sign(pz) * 0.5;
+
+        posAttr.array[ix] += vx;
+        posAttr.array[iy] += vy;
+        posAttr.array[iz] += vz;
+
+        velocities[ix] = vx;
+        velocities[iy] = vy;
+        velocities[iz] = vz;
+    }
+
+    posAttr.needsUpdate = true;
+
+    // 更新连线 (选取前100对邻近点)
+    updateLines();
+
+    renderer.render(scene, camera);
+}
+
+function updateLines() {
+    const linePositions = [];
+    const lineColors = [];
+    const posArray = particles.geometry.attributes.position.array;
+    const threshold = 80;
+
+    // 为了性能，只检测前 150 个点之间的距离
+    const checkCount = Math.min(particleCount, 150);
+    for (let i = 0; i < checkCount; i++) {
+        for (let j = i + 1; j < checkCount; j++) {
+            const dx = posArray[i*3] - posArray[j*3];
+            const dy = posArray[i*3+1] - posArray[j*3+1];
+            const dz = posArray[i*3+2] - posArray[j*3+2];
+            const distSq = dx*dx + dy*dy + dz*dz;
+
+            if (distSq < threshold * threshold) {
+                linePositions.push(posArray[i*3], posArray[i*3+1], posArray[i*3+2]);
+                linePositions.push(posArray[j*3], posArray[j*3+1], posArray[j*3+2]);
+                
+                const alpha = 1 - (Math.sqrt(distSq) / threshold);
+                const c = particleMainColor;
+                lineColors.push(c.r, c.g, c.b, c.r, c.g, c.b);
+            }
+        }
+    }
+    lineMesh.geometry.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
+    lineMesh.geometry.setAttribute('color', new THREE.Float32BufferAttribute(lineColors, 3));
+}
+
+/** -----------------------------------------------------------------
+ * UI 交互逻辑
+ * ----------------------------------------------------------------- */
+function onWindowResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+document.getElementById('particle-slider').addEventListener('input', (e) => {
+    particleCount = parseInt(e.target.value);
+    document.getElementById('particle-count-val').innerText = particleCount;
+    createParticles(particleCount);
+});
+
+document.querySelectorAll('.color-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.color-btn').forEach(b => b.classList.replace('border-white', 'border-transparent'));
+        btn.classList.replace('border-transparent', 'border-white');
+        particleMainColor = new THREE.Color(btn.dataset.color);
+        createParticles(particleCount);
+    });
+});
+
+document.getElementById('reset-btn').addEventListener('click', () => {
+    createParticles(particleCount);
+    scene.rotation.set(0, 0, 0);
+});
+
+document.getElementById('fullscreen-btn').addEventListener('click', () => {
+    if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen();
+        document.getElementById('fullscreen-btn').innerText = "退出全屏";
+    } else {
+        document.exitFullscreen();
+        document.getElementById('fullscreen-btn').innerText = "全屏模式";
+    }
+});
+
+// 启动系统
+window.onload = () => {
+    initThree();
+    initMediaPipe();
+};
+</script>
+</body>
+</html>
