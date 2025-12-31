@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 智能旅游规划器</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
+        body { font-family: 'Noto+Sans+SC', sans-serif; background-color: #f8fafc; }
+        .glass-card { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.3); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        const Icon = ({ name, size = 20, className = "" }) => {
+            useEffect(() => { lucide.createIcons(); }, []);
+            return <i data-lucide={name} style={{ width: size, height: size }} className={className}></i>;
+        };
+
+        // --- 配置区 ---
+        const DEEPSEEK_API_KEY = "sk-896814e63bf744fcb10a2bb100c013e9"; // 填入你的 DeepSeek API Key
+        const AMAP_KEY = "c1854406201e74f1b0f55c1410444383"; // 示例高德定位KEY，生产环境建议替换
+
+        const App = () => {
+            const [origin, setOrigin] = useState("正在定位...");
+            const [destination, setDestination] = useState("");
+            const [startDate, setStartDate] = useState("");
+            const [days, setDays] = useState(3);
+            const [loading, setLoading] = useState(false);
+            const [itinerary, setItinerary] = useState(null);
+            const [error, setError] = useState(null);
+
+            // 1. 自动定位 IP
+            useEffect(() => {
+                fetch(`https://restapi.amap.com/v3/ip?key=${AMAP_KEY}`)
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.city && typeof data.city === 'string') {
+                            setOrigin(data.city);
+                        } else {
+                            setOrigin("北京市");
+                        }
+                    })
+                    .catch(() => setOrigin("上海市"));
+            }, []);
+
+            // 2. 调用 DeepSeek API 生成规划
+            const generatePlan = async () => {
+                if (!destination) {
+                    setError("请输入目的地");
+                    return;
+                }
+                setLoading(true);
+                setError(null);
+
+                const systemPrompt = `你是一个专业的资深旅游规划师。请模拟从携程、小红书等平台检索最新数据。
+                你需要规划一个包含交通方式（高铁/飞机/自驾）、景点详情、地理逻辑合理的行程。
+                输出必须是严格的 JSON 格式。`;
+
+                const userPrompt = `规划从 ${origin} 到 ${destination} 的旅游计划。
+                出发日期：${startDate}，时长：${days}天。
+                请包含：
+                1. 建议的交通工具、时长和预估费用。
+                2. 每日详细行程（早中晚）。
+                3. 目的地必去景点（参考小红书热度）。
+                4. 避雷建议。
+                
+                JSON 结构：
+                {
+                  "overview": { "transport": "交通建议", "cost": "预估总花费", "duration": "总耗时" },
+                  "dailyPlans": [
+                    { "day": 1, "activities": [{ "time": "09:00", "spot": "景点名称", "desc": "详情说明" }] }
+                  ],
+                  "tips": ["建议1", "建议2"]
+                }`;
+
+                try {
+                    const response = await fetch("https://api.deepseek.com/chat/completions", {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
+                        },
+                        body: JSON.stringify({
+                            model: "deepseek-chat",
+                            messages: [
+                                { role: "system", content: systemPrompt },
+                                { role: "user", content: userPrompt }
+                            ],
+                            response_format: { type: 'json_object' }
+                        })
+                    });
+
+                    if (!response.ok) throw new Error("API 请求失败，请检查 Key 或网络环境");
+                    const data = await response.json();
+                    setItinerary(JSON.parse(data.choices[0].message.content));
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen pb-20">
+                    {/* Header */}
+                    <header className="bg-white border-b px-6 py-4 sticky top-0 z-50">
+                        <div className="max-w-4xl mx-auto flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-blue-600">
+                                <Icon name="map-pin" size={24} />
+                                <h1 className="text-xl font-bold">AI 智能旅游规划</h1>
+                            </div>
+                        </div>
+                    </header>
+
+                    <main className="max-w-4xl mx-auto px-4 mt-8">
+                        {/* Input Section */}
+                        <section className="glass-card rounded-3xl p-6 shadow-xl mb-8">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium text-slate-500 flex items-center gap-1">
+                                        <Icon name="navigation" size={14} /> 出发地
+                                    </label>
+                                    <input 
+                                        type="text" value={origin} onChange={e => setOrigin(e.target.value)}
+                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium text-slate-500 flex items-center gap-1">
+                                        <Icon name="map" size={14} /> 目的地
+                                    </label>
+                                    <input 
+                                        type="text" placeholder="想去哪里？(如：大理)" 
+                                        value={destination} onChange={e => setDestination(e.target.value)}
+                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium text-slate-500 flex items-center gap-1">
+                                        <Icon name="calendar" size={14} /> 出发日期
+                                    </label>
+                                    <input 
+                                        type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+                                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium text-slate-500 flex items-center gap-1">
+                                        <Icon name="timer" size={14} /> 旅行天数 ({days} 天)
+                                    </label>
+                                    <input 
+                                        type="range" min="1" max="15" value={days} onChange={e => setDays(e.target.value)}
+                                        className="w-full h-2 bg-slate-200 rounded-lg appearance-none accent-blue-600 mt-4"
+                                    />
+                                </div>
+                            </div>
+
+                            <button 
+                                onClick={generatePlan}
+                                disabled={loading}
+                                className="w-full mt-6 bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl shadow-lg transition-all flex items-center justify-center gap-2"
+                            >
+                                {loading ? <Icon name="loader-2" className="animate-spin" /> : <Icon name="sparkles" />}
+                                {loading ? "正在全网搜索规划中..." : "开启我的 AI 旅程"}
+                            </button>
+                        </section>
+
+                        {/* Error Display */}
+                        {error && (
+                            <div className="bg-red-50 text-red-600 p-4 rounded-xl border border-red-100 mb-8 flex items-center gap-2">
+                                <Icon name="alert-circle" /> {error}
+                            </div>
+                        )}
+
+                        {/* Result Section */}
+                        {itinerary && (
+                            <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                                {/* Overview Card */}
+                                <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm flex flex-wrap gap-6 justify-between items-center">
+                                    <div className="flex items-center gap-4">
+                                        <div className="p-3 bg-blue-50 text-blue-600 rounded-2xl"><Icon name="plane" size={24} /></div>
+                                        <div>
+                                            <p className="text-xs text-slate-400 font-bold uppercase">交通建议</p>
+                                            <p className="font-bold text-slate-800">{itinerary.overview.transport}</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-4">
+                                        <div className="p-3 bg-green-50 text-green-600 rounded-2xl"><Icon name="wallet" size={24} /></div>
+                                        <div>
+                                            <p className="text-xs text-slate-400 font-bold uppercase">预估花费</p>
+                                            <p className="font-bold text-slate-800">{itinerary.overview.cost}</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-4">
+                                        <div className="p-3 bg-orange-50 text-orange-600 rounded-2xl"><Icon name="clock" size={24} /></div>
+                                        <div>
+                                            <p className="text-xs text-slate-400 font-bold uppercase">行程天数</p>
+                                            <p className="font-bold text-slate-800">{days} 天</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Daily Plans */}
+                                <div className="space-y-4">
+                                    <h2 className="text-xl font-bold text-slate-800 px-2 flex items-center gap-2">
+                                        <Icon name="calendar-check" className="text-blue-600" /> 详细行程
+                                    </h2>
+                                    {itinerary.dailyPlans.map((dayPlan, idx) => (
+                                        <div key={idx} className="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm">
+                                            <div className="flex items-center gap-3 mb-6">
+                                                <span className="bg-blue-600 text-white w-10 h-10 rounded-full flex items-center justify-center font-bold">D{dayPlan.day}</span>
+                                                <h3 className="font-bold text-lg">行程安排</h3>
+                                            </div>
+                                            <div className="space-y-6 relative border-l-2 border-slate-50 ml-5 pl-8">
+                                                {dayPlan.activities.map((act, i) => (
+                                                    <div key={i} className="relative">
+                                                        <div className="absolute -left-[37px] top-1.5 w-4 h-4 rounded-full bg-blue-100 border-4 border-blue-600"></div>
+                                                        <div className="flex items-start justify-between mb-1">
+                                                            <span className="text-sm font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded uppercase">{act.time}</span>
+                                                        </div>
+                                                        <h4 className="font-bold text-slate-800 text-lg mb-1">{act.spot}</h4>
+                                                        <p className="text-slate-500 text-sm leading-relaxed">{act.desc}</p>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+
+                                {/* Tips */}
+                                <div className="bg-slate-900 rounded-3xl p-6 text-white">
+                                    <h3 className="flex items-center gap-2 font-bold mb-4 text-orange-400 uppercase tracking-widest text-sm">
+                                        <Icon name="shield-check" /> 出行贴士 & 避雷建议
+                                    </h3>
+                                    <ul className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        {itinerary.tips.map((tip, i) => (
+                                            <li key={i} className="flex items-center gap-2 text-slate-300 text-sm">
+                                                <div className="w-1.5 h-1.5 bg-orange-400 rounded-full"></div>
+                                                {tip}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            </div>
+                        )}
+                    </main>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
